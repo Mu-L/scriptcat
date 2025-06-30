@@ -33,13 +33,18 @@ export class SystemService {
     this.group.on("loadFavicon", async (url) => {
       // 加载favicon图标
       // 对url做一个缓存
-      return Cache.getInstance().getOrSet(`favicon:${url}`, async () => {
-        return fetch(url)
-          .then((response) => response.blob())
-          .then((blob) => createObjectURL(this.sender, blob, true))
-          .catch(() => {
-            return "";
-          });
+      return Cache.getInstance().tx(`tx:favicon:${url}`, async (result) => {
+        if (result) {
+          return result;
+        }
+        return Cache.getInstance().getOrSet(`favicon:${url}`, async () => {
+          return fetch(url)
+            .then((response) => response.blob())
+            .then((blob) => createObjectURL(this.sender, blob, true))
+            .catch(() => {
+              return "";
+            });
+        });
       });
     });
   }
