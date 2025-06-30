@@ -17,17 +17,22 @@ const chunkArray = <T>(array: T[], chunkSize: number): T[][] => {
 
 // 处理单个脚本的favicon
 const processScriptFavicon = async (script: Script) => {
-  return {
-    uuid: script.uuid,
-    fav: await Cache.getInstance().getOrSet(`favicon:${script.uuid}`, async () => {
-      const icons = await extractFavicons(script.metadata!.match || [], script.metadata!.include || []);
-      if (icons.length === 0) return [];
+  if (!script.uuid || !script.metadata) {
+    return { uuid: script.uuid || '', fav: [] };
+  }
+  
+  try {
+    return {
+      uuid: script.uuid,
+      fav: await Cache.getInstance().getOrSet(`favicon:${script.uuid}`, async () => {
+        const icons = await extractFavicons(script.metadata!.match || [], script.metadata!.include || []);
+        if (icons.length === 0) return [];
 
-      // 从缓存中获取favicon图标
-      const systemClient = new SystemClient(message);
-      const newIcons = await Promise.all(
-        icons.map((icon) => {
-          // 没有的话缓存到本地使用URL.createObjectURL
+        // 从缓存中获取favicon图标
+        const systemClient = new SystemClient(message);
+        
+        // 添加超时控制的Promise处理
+        const loadIconWithTimeout = (icon: any) => {
           if (!icon.icon) {
             return Promise.resolve({
               match: icon.match,
@@ -35,36 +40,74 @@ const processScriptFavicon = async (script: Script) => {
               icon: "",
             });
           }
-          // 因为需要持久化URL.createObjectURL，所以需要通过调用到offscreen来创建
-          return systemClient
+          
+          // 设置5秒超时
+          const timeout = new Promise<any>((_, reject) => 
+            setTimeout(() => reject(new Error('Favicon加载超时')), 5000)
+          );
+          
+          const loadIcon = systemClient
             .loadFavicon(icon.icon)
             .then((url) => ({
               match: icon.match,
               website: icon.website,
               icon: url,
             }))
-            .catch(() => ({
-              match: icon.match,
-              website: icon.website,
-              icon: "",
-            }));
-        })
-      );
-      return newIcons;
-    }),
-  };
+            .catch((err) => {
+              console.warn(`加载图标失败: ${icon.website}`, err);
+              return {
+                match: icon.match,
+                website: icon.website,
+                icon: "",
+              };
+            });
+            
+          return Promise.race([loadIcon, timeout]).catch(() => ({
+            match: icon.match,
+            website: icon.website,
+            icon: "",
+          }));
+        };
+        
+        const newIcons = await Promise.all(icons.map(loadIconWithTimeout));
+        return newIcons;
+      })
+    };
+  } catch (err) {
+    console.error(`处理脚本favicon失败: ${script.name || script.uuid}`, err);
+    return {
+      uuid: script.uuid,
+      fav: [],
+    };
+  }
 };
 
 // 在scriptSlice创建后处理favicon加载，以批次方式处理
 export const loadScriptFavicons = async (scripts: Script[]) => {
-  const batchSize = 20; // 每批处理20个脚本
-  const scriptChunks = chunkArray(scripts, batchSize);
-
-  // 逐批处理脚本
-  for (const chunk of scriptChunks) {
-    Promise.all(chunk.map(processScriptFavicon)).then((chunkResults) => {
-      // 每完成一批就更新一次store
-      store.dispatch(scriptSlice.actions.setScriptFavicon(chunkResults));
-    });
+  if (!scripts || scripts.length === 0) {
+    return;
+  }
+  
+  try {
+    const batchSize = 20; // 每批处理20个脚本
+    const scriptChunks = chunkArray(scripts, batchSize);
+    
+    // 逐批处理脚本
+    for (const chunk of scriptChunks) {
+      try {
+        const chunkResults = await Promise.all(chunk.map(processScriptFavicon));
+        
+        // 每完成一批就更新一次store
+        store.dispatch(scriptSlice.actions.setScriptFavicon(chunkResults));
+        
+        // 添加小延迟，避免浏览器过载
+        await new Promise(resolve => setTimeout(resolve, 10));
+      } catch (err) {
+        console.error('处理favicon批次失败', err);
+        // 继续处理下一批
+      }
+    }
+  } catch (err) {
+    console.error('加载脚本图标失败', err);
   }
 };
